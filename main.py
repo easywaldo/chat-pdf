@@ -5,7 +5,7 @@ import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_classic.retrievers import MultiQueryRetriever
 from langchain_classic import hub
 from langchain_core.output_parsers import StrOutputParser
@@ -33,7 +33,7 @@ def build_rag_chain(pdf_file):
         texts = splitter.split_documents(pages)
 
         embeddings_model = OpenAIEmbeddings(model="text-embedding-3-large")
-        db = Chroma.from_documents(texts, embeddings_model)
+        db = FAISS.from_documents(texts, embeddings_model)
 
         llm = ChatOpenAI(temperature=0)
         retriever = MultiQueryRetriever.from_llm(
