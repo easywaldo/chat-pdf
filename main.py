@@ -1,9 +1,12 @@
+import tempfile
+import os
+
+import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from langchain_classic.retrievers import MultiQueryRetriever
-from langchain_openai import ChatOpenAI
 from langchain_classic import hub
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -11,57 +14,89 @@ from langchain_core.runnables import RunnablePassthrough
 from dotenv import load_dotenv
 load_dotenv()
 
-# Loader
-loader = PyPDFLoader("unsu.pdf")
-pages = loader.load_and_split()
 
-print(f"총 페이지 수: {len(pages)}")
-print(f"첫 페이지 내용:\n{pages[0].page_content[:500]}")  # 첫 페이지의 처음 500자 출력
+def build_rag_chain(pdf_file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(pdf_file.read())
+        tmp_path = tmp.name
 
-# Splitter
-text_splitter = RecursiveCharacterTextSplitter(
-    #Set a really small chunk size just to show.
-    chunk_size=300,
-    chunk_overlap=20,
-    length_function=len,
-    is_separator_regex=False,
+    try:
+        loader = PyPDFLoader(tmp_path)
+        pages = loader.load_and_split()
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=300,
+            chunk_overlap=20,
+            length_function=len,
+            is_separator_regex=False,
+        )
+        texts = splitter.split_documents(pages)
+
+        embeddings_model = OpenAIEmbeddings(model="text-embedding-3-large")
+        db = Chroma.from_documents(texts, embeddings_model)
+
+        llm = ChatOpenAI(temperature=0)
+        retriever = MultiQueryRetriever.from_llm(
+            retriever=db.as_retriever(),
+            llm=llm,
+        )
+
+        prompt = hub.pull("rlm/rag-prompt")
+
+        def format_docs(docs):
+            return "\n\n".join(
+                [f"Document {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)]
+            )
+
+        chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+        return chain
+    finally:
+        os.unlink(tmp_path)
+
+
+# ── Streamlit UI ──────────────────────────────────────────────────────────────
+
+st.set_page_config(page_title="Chat PDF", page_icon="📄", layout="centered")
+st.title("📄 Chat PDF")
+
+# ── PDF 업로드 영역 ────────────────────────────────────────────────────────────
+st.subheader("PDF 업로드")
+uploaded_file = st.file_uploader(
+    "PDF 파일을 드래그하거나 클릭하여 선택하세요.",
+    type=["pdf"],
+    label_visibility="collapsed",
 )
 
-texts = text_splitter.split_documents(pages)
-print(f"총 텍스트 청크 수: {len(texts)}")
-print(texts[0])  # 첫 번째 텍스트 청크 출력
+if uploaded_file:
+    st.success(f"{uploaded_file.name} 업로드 완료")
 
-#Embeddings
-embeddings_model = OpenAIEmbeddings(
-    model="text-embedding-3-large",
-    # With the `text-embedding-3-large` class of models, you can specify size of the embeddings you want returned. dimensions=1024
-)
+    if "rag_chain" not in st.session_state or st.session_state.get("last_file") != uploaded_file.name:
+        with st.spinner("PDF를 분석하는 중..."):
+            st.session_state.rag_chain = build_rag_chain(uploaded_file)
+            st.session_state.last_file = uploaded_file.name
 
-# Chroma DB
-db = Chroma.from_documents(texts, embeddings_model)
+    # ── 질문 영역 ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("PDF에게 질문해보세요!!")
 
-# Retriever
-llm = ChatOpenAI(temperature=0)
+    question = st.text_input("질문을 입력하세요.", placeholder="예: 이 문서의 핵심 내용은 무엇인가요?")
 
-retriever_from_llm = MultiQueryRetriever.from_llm(
-    retriever=db.as_retriever(),
-    llm=llm,
-)
+    ask = st.button("질문하기", type="primary", use_container_width=True)
 
-# Prompt
-prompt = hub.pull("rlm/rag-prompt")
+    # ── 답변 출력 영역 ─────────────────────────────────────────────────────────
+    answer_box = st.empty()
 
-# Generate response
-def format_docs(docs):
-    return "\n\n".join([f"Document {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
-
-rag_chain = (
-    {
-        "context": retriever_from_llm | format_docs, "question": RunnablePassthrough()
-    } | prompt | llm | StrOutputParser()
-)
-
-# Question
-result = rag_chain.invoke("아내가 먹고 싶어하는 음식은 무엇인가요?")
-print("질문에 대한 답변:")
-print(result)
+    if ask:
+        if not question.strip():
+            st.warning("질문을 입력해주세요.")
+        else:
+            with answer_box.container():
+                with st.spinner("답변을 생성하는 중..."):
+                    answer = st.session_state.rag_chain.invoke(question)
+                st.markdown("**답변**")
+                st.write(answer)
